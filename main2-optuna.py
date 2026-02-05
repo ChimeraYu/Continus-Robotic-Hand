@@ -123,16 +123,27 @@ def calculate_discriminant(B1, B2, B3):
     return B2 ** 2 - 4 * B1 * B3
 
 
-def solve_quadratic(B1, B2, discriminant):
-    if discriminant >= 0:
-        root1 = (-B2 + np.sqrt(discriminant)) / (2 * B1)
-        root2 = (-B2 - np.sqrt(discriminant)) / (2 * B1)
-        return root1, root2
-    else:
+def solve_quadratic(B1, B2, B3, discriminant, eps=1e-10):
+    """
+    通用求根：优先按二次方程求解；当 B1≈0 时退化为一次方程。
+    """
+    if abs(B1) <= eps:
+        if abs(B2) <= eps:
+            return None, None
+        linear_root = -B3 / B2
+        return linear_root, linear_root
+
+    if discriminant < -eps:
         return None, None
 
+    discriminant = max(discriminant, 0.0)
+    sqrt_d = np.sqrt(discriminant)
+    root1 = (-B2 + sqrt_d) / (2 * B1)
+    root2 = (-B2 - sqrt_d) / (2 * B1)
+    return root1, root2
 
-def calculate_w(V_col, L, w_0):
+
+def calculate_w(V_col, L, w_0, max_abs_w=200):
     """
     由列向量 V_col 依次计算 w(i)，结果返回一个列表 [w_0, w_1, ..., w_n]
     """
@@ -145,15 +156,15 @@ def calculate_w(V_col, L, w_0):
         B2 = -((2 * v ** 2 + (L ** 2 / 2)) * w_prev)
         B3 = (v ** 2 * L ** 2) + (v ** 2 - (L ** 2 / 4)) * w_prev ** 2
         discriminant = calculate_discriminant(B1, B2, B3)
-        root1, root2 = solve_quadratic(B1, B2, discriminant)
+        root1, root2 = solve_quadratic(B1, B2, B3, discriminant)
         if root1 is not None and root2 is not None:
-            # 比较哪个 root 距离 w_prev 更近
+            # 比较哪个 root 距离 w_prev 更近␊
             if abs(root1 - w_prev) < abs(root2 - w_prev):
                 w_new = root1
             else:
                 w_new = root2
-            # 简单限定 |w_new| <= 200
-            if abs(w_new) <= 200:
+            # 简单限定 |w_new| <= max_abs_w
+            if abs(w_new) <= max_abs_w:
                 w_list.append(w_new)
             else:
                 w_list.append(np.nan)
@@ -418,4 +429,8 @@ if __name__ == "__main__":
 
     print(f"Results saved to {output_path}")
     print("Done.")
+
+
+    print("Done.")
+
 
