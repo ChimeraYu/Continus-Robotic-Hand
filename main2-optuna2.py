@@ -10,6 +10,25 @@ from sklearn.metrics import mean_squared_error
 # --- Optuna 相关 ---
 import optuna
 
+# ======================
+# 用户参数配置（优先修改这里）
+# ======================
+# 1) 每一节近似柔性关节长度
+L = 200
+
+# 2) 引导线数量与 Optuna 超参数搜索空间
+NUM_WIRES = 2
+ALPHA_RANGE = (2.0, 100.0)
+W0_RANGE = (-200.0, 200.0)
+
+# 3) 数据与模型配置（按需修改）
+DATA_FILE_PATH = r'E:\桌面\code\1.xlsx'
+E_FILE_PATH = r'E:\桌面\code\E.xlsx'
+OUTPUT_PATH = r'E:\桌面\code\results_main3.xlsx'
+PCA_COMPONENTS = NUM_WIRES
+CUTOFF_FREQUENCY = 0.1
+SAMPLE_RATE = 1.0
+
 
 # ------------------------
 # 1. 常用功能函数
@@ -93,8 +112,8 @@ def compute_W_element(l, w_2, e_n1):
 
 
 def construct_matrix_W(l, w_lists):
-    if len(w_lists) != 2:
-        raise ValueError("w_lists should contain two arrays.")
+    if len(w_lists) == 0:
+        raise ValueError("w_lists should contain at least one wire trajectory.")
 
     all_W_matrices = []
     for w in w_lists:
@@ -123,16 +142,27 @@ def calculate_discriminant(B1, B2, B3):
     return B2 ** 2 - 4 * B1 * B3
 
 
-def solve_quadratic(B1, B2, discriminant):
-    if discriminant >= 0:
-        root1 = (-B2 + np.sqrt(discriminant)) / (2 * B1)
-        root2 = (-B2 - np.sqrt(discriminant)) / (2 * B1)
-        return root1, root2
-    else:
+def solve_quadratic(B1, B2, B3, discriminant, eps=1e-10):
+    """
+    通用求根：优先按二次方程求解；当 B1≈0 时退化为一次方程。
+    """
+    if abs(B1) <= eps:
+        if abs(B2) <= eps:
+            return None, None
+        linear_root = -B3 / B2
+        return linear_root, linear_root
+
+    if discriminant < -eps:
         return None, None
 
+    discriminant = max(discriminant, 0.0)
+    sqrt_d = np.sqrt(discriminant)
+    root1 = (-B2 + sqrt_d) / (2 * B1)
+    root2 = (-B2 - sqrt_d) / (2 * B1)
+    return root1, root2
 
-def calculate_w(V_col, L, w_0):
+
+def calculate_w(V_col, L, w_0, max_abs_w=200):
     """
     由列向量 V_col 依次计算 w(i)，结果返回一个列表 [w_0, w_1, ..., w_n]
     """
@@ -145,21 +175,45 @@ def calculate_w(V_col, L, w_0):
         B2 = -((2 * v ** 2 + (L ** 2 / 2)) * w_prev)
         B3 = (v ** 2 * L ** 2) + (v ** 2 - (L ** 2 / 4)) * w_prev ** 2
         discriminant = calculate_discriminant(B1, B2, B3)
-        root1, root2 = solve_quadratic(B1, B2, discriminant)
+        root1, root2 = solve_quadratic(B1, B2, B3, discriminant)
         if root1 is not None and root2 is not None:
             # 比较哪个 root 距离 w_prev 更近
             if abs(root1 - w_prev) < abs(root2 - w_prev):
                 w_new = root1
             else:
                 w_new = root2
-            # 简单限定 |w_new| <= 200
-            if abs(w_new) <= 200:
+            # 简单限定 |w_new| <= max_abs_w
+            if abs(w_new) <= max_abs_w:
                 w_list.append(w_new)
             else:
                 w_list.append(np.nan)
         else:
             w_list.append(np.nan)
     return w_list
+
+
+
+
+def build_param_names(num_wires):
+    alpha_names = [f"alpha_{i + 1}" for i in range(num_wires)]
+    w0_names = [f"w_0_{i + 1}" for i in range(num_wires)]
+    return alpha_names, w0_names
+
+
+def suggest_wire_parameters(trial, alpha_names, w0_names):
+    alpha_values = [trial.suggest_float(name, *ALPHA_RANGE, log=True) for name in alpha_names]
+    w0_values = [trial.suggest_float(name, *W0_RANGE) for name in w0_names]
+    return alpha_values, w0_values
+
+
+def calculate_w_lists(V, l, w0_values):
+    w_lists = []
+    for wire_idx, w0 in enumerate(w0_values):
+        w_list = calculate_w(V[:, wire_idx:wire_idx + 1], l, w0)
+        if contains_nan(w_list):
+            return None
+        w_lists.append(w_list)
+    return w_lists
 
 
 def butterworth_filter(data, cutoff, sample_rate, order=5):
@@ -237,8 +291,7 @@ def calculate_comprehensive_loss(theta_actual, theta_desired,
 # ---------------------
 # 全局数据加载和预处理
 # ---------------------
-file_path = r'E:\桌面\code\1.xlsx'
-data = pd.read_excel(file_path, header=None).values  # (N, M)
+data = pd.read_excel(DATA_FILE_PATH, header=None).values  # (N, M)
 
 # Step 1: 计算每行均值 (theta_r_bar)
 theta_r_bar = np.mean(data, axis=1, keepdims=True)  # (N, 1)
@@ -247,19 +300,17 @@ theta_r_bar = np.mean(data, axis=1, keepdims=True)  # (N, 1)
 centered_data = data - theta_r_bar
 
 # Step 3: PCA 降维 (60 -> 2)
-pca = PCA(n_components=2)
-sigma_M = pca.fit_transform(centered_data.T)  # (M, 2)
-S_M = pca.components_.T  # (N, 2)
+pca = PCA(n_components=PCA_COMPONENTS)
+sigma_M = pca.fit_transform(centered_data.T)  # (M, NUM_WIRES)
+S_M = pca.components_.T  # (N, NUM_WIRES)
 
 # Step 4: Butterworth 对 S_M 的每一列平滑滤波
-cutoff_frequency = 0.1
-sample_rate = 1.0
 S_M_smoothed = np.zeros_like(S_M)
 for i in range(S_M.shape[1]):
-    S_M_smoothed[:, i] = butterworth_filter(S_M[:, i], cutoff_frequency, sample_rate)
+    S_M_smoothed[:, i] = butterworth_filter(S_M[:, i], CUTOFF_FREQUENCY, SAMPLE_RATE)
 
 # Step 5: 将 sigma_M 坐标平移至非负
-min_values = np.min(sigma_M, axis=0)  # (2,)
+min_values = np.min(sigma_M, axis=0)  # (NUM_WIRES,)
 sigma_M_shifted = sigma_M - min_values
 
 # ==== 关键补充：更新 theta_r_bar (黄色公式) ====
@@ -267,54 +318,39 @@ theta_r_bar_updated = theta_r_bar + S_M @ min_values.reshape(-1, 1)
 theta_r_bar = theta_r_bar_updated
 
 # Step 6: 加载对角矩阵 E
-file_path_E = r'E:\桌面\code\E.xlsx'
-E_data = pd.read_excel(file_path_E, header=None).values
-
-# 转换单位：从 N·mm/deg 转换为 N·mm/rad
-conversion_factor = np.pi / 180  # 从 deg 到 rad 的转换系数
-E_data_rad = E_data * conversion_factor
-
-# 构造对角矩阵 E
-E = np.diag(E_data_rad.flatten())
-
-# 计算矩阵的逆
+E_data = pd.read_excel(E_FILE_PATH, header=None).values
+E = np.diag(E_data.flatten())
 E_inv = np.linalg.inv(E)
 
-# 长度 L
-L = 200
+if PCA_COMPONENTS != NUM_WIRES:
+    raise ValueError("PCA_COMPONENTS must equal NUM_WIRES for alpha/W dimensions to match.")
+
+ALPHA_NAMES, W0_NAMES = build_param_names(NUM_WIRES)
 
 
 # ---------------------
 # 训练(优化)部分 - 使用 Optuna
 # ---------------------
 def objective(trial):
-    # 1) 超参数搜索空间
-    alpha_11 = trial.suggest_float("alpha_11", 0.000001, 0.01, log=True)
-    alpha_22 = trial.suggest_float("alpha_22", 0.000001, 0.01, log=True)
-    w_0_1 = trial.suggest_float("w_0_1", -200.0, 200.0)
-    w_0_2 = trial.suggest_float("w_0_2", -200.0, 200.0)
+    # 1) 超参数搜索空间（按引导线数量自动生成）
+    alpha_values, w0_values = suggest_wire_parameters(trial, ALPHA_NAMES, W0_NAMES)
 
     try:
         # 2) 组装 alpha 矩阵
-        alpha_local = np.diag([alpha_11, alpha_22])
+        alpha_local = np.diag(alpha_values)
         alpha_inv_local = np.linalg.inv(alpha_local)
 
         # 3) 根据公式计算 f_local & V_local
         #    f_local = alpha * sigma_M_shifted 的转置
-        f_local = alpha_local @ sigma_M_shifted.T  # (2, M)
-        V_local = E @ S_M_smoothed @ alpha_inv_local  # (N, 2)
+        f_local = alpha_local @ sigma_M_shifted.T  # (NUM_WIRES, M)
+        V_local = E @ S_M_smoothed @ alpha_inv_local  # (N, NUM_WIRES)
 
-        # 4) 分别计算 SoP_1, SoP_2
-        sop_1_local = calculate_w(V_local[:, 0:1], L, w_0_1)
-        if contains_nan(sop_1_local):
+        # 4) 分别计算每根引导线对应的 SoP
+        w_lists_local = calculate_w_lists(V_local, L, w0_values)
+        if w_lists_local is None:
             return 1e9  # 若出现 NaN，视为无效解
 
-        sop_2_local = calculate_w(V_local[:, 1:2], L, w_0_2)
-        if contains_nan(sop_2_local):
-            return 1e9
-
         # 5) 构建 W 矩阵
-        w_lists_local = [sop_1_local, sop_2_local]
         W_matrix_local = construct_matrix_W(L, w_lists_local)
 
         # 6) 计算最终的 theta_results
@@ -354,21 +390,19 @@ if __name__ == "__main__":
     # ================================
     # 用最优参数计算并可视化
     # ================================
-    alpha_11_best = best_params['alpha_11']
-    alpha_22_best = best_params['alpha_22']
-    w_0_1_best = best_params['w_0_1']
-    w_0_2_best = best_params['w_0_2']
+    alpha_values_best = [best_params[name] for name in ALPHA_NAMES]
+    w0_values_best = [best_params[name] for name in W0_NAMES]
 
-    alpha_best = np.diag([alpha_11_best, alpha_22_best])
+    alpha_best = np.diag(alpha_values_best)
     alpha_inv_best = np.linalg.inv(alpha_best)
 
     # f_best = alpha_best @ sigma_M_shifted.T
-    f_best = alpha_best @ sigma_M_shifted.T  # (2, M)
-    V_best = E @ S_M_smoothed @ alpha_inv_best  # (N, 2)
+    f_best = alpha_best @ sigma_M_shifted.T  # (NUM_WIRES, M)
+    V_best = E @ S_M_smoothed @ alpha_inv_best  # (N, NUM_WIRES)
 
-    sop_1_best = calculate_w(V_best[:, 0:1], L, w_0_1_best)
-    sop_2_best = calculate_w(V_best[:, 1:2], L, w_0_2_best)
-    w_lists_best = [sop_1_best, sop_2_best]
+    w_lists_best = calculate_w_lists(V_best, L, w0_values_best)
+    if w_lists_best is None:
+        raise RuntimeError("Best parameters generated invalid SoP trajectories.")
     W_matrix_best = construct_matrix_W(L, w_lists_best)
 
     theta_results_best = E_inv @ W_matrix_best @ f_best + theta_r_bar
@@ -376,7 +410,7 @@ if __name__ == "__main__":
     # 可视化对比：1)原始 data 与 2)优化后的结果
     paths_theta_results = []
     labels_theta_results = []
-    segment_length = 200
+    segment_length = L
 
     for col_idx in range(theta_results_best.shape[1]):
         angle_list = theta_results_best[:, col_idx]
@@ -404,7 +438,7 @@ if __name__ == "__main__":
     # ================
     # Step 7: Save results
     # ================
-    output_path = r'E:\桌面\code\results_main3.xlsx'
+    output_path = OUTPUT_PATH
     with pd.ExcelWriter(output_path) as writer:
         # 如果希望与“基准文件”相同 Sheet 名，可以按下述方式写入：
         pd.DataFrame(S_M).to_excel(writer, sheet_name='S(M)', index=False, header=False)
