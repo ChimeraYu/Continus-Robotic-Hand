@@ -10,6 +10,26 @@ from sklearn.metrics import mean_squared_error
 # --- Optuna 相关 ---
 import optuna
 
+# ======================
+# 用户参数配置（优先修改这里）
+# ======================
+# 1) 每一节近似柔性关节长度
+L = 200
+
+# 2) Optuna 超参数搜索空间
+ALPHA_11_RANGE = (2.0, 100.0)
+ALPHA_22_RANGE = (2.0, 100.0)
+W0_1_RANGE = (-200.0, 200.0)
+W0_2_RANGE = (-200.0, 200.0)
+
+# 3) 数据与模型配置（按需修改）
+DATA_FILE_PATH = r'E:\桌面\code\1.xlsx'
+E_FILE_PATH = r'E:\桌面\code\E.xlsx'
+OUTPUT_PATH = r'E:\桌面\code\results_main3.xlsx'
+PCA_COMPONENTS = 2
+CUTOFF_FREQUENCY = 0.1
+SAMPLE_RATE = 1.0
+
 
 # ------------------------
 # 1. 常用功能函数
@@ -158,7 +178,7 @@ def calculate_w(V_col, L, w_0, max_abs_w=200):
         discriminant = calculate_discriminant(B1, B2, B3)
         root1, root2 = solve_quadratic(B1, B2, B3, discriminant)
         if root1 is not None and root2 is not None:
-            # 比较哪个 root 距离 w_prev 更近␊
+            # 比较哪个 root 距离 w_prev 更近
             if abs(root1 - w_prev) < abs(root2 - w_prev):
                 w_new = root1
             else:
@@ -248,8 +268,7 @@ def calculate_comprehensive_loss(theta_actual, theta_desired,
 # ---------------------
 # 全局数据加载和预处理
 # ---------------------
-file_path = r'E:\桌面\code\1.xlsx'
-data = pd.read_excel(file_path, header=None).values  # (N, M)
+data = pd.read_excel(DATA_FILE_PATH, header=None).values  # (N, M)
 
 # Step 1: 计算每行均值 (theta_r_bar)
 theta_r_bar = np.mean(data, axis=1, keepdims=True)  # (N, 1)
@@ -258,16 +277,14 @@ theta_r_bar = np.mean(data, axis=1, keepdims=True)  # (N, 1)
 centered_data = data - theta_r_bar
 
 # Step 3: PCA 降维 (60 -> 2)
-pca = PCA(n_components=2)
+pca = PCA(n_components=PCA_COMPONENTS)
 sigma_M = pca.fit_transform(centered_data.T)  # (M, 2)
 S_M = pca.components_.T  # (N, 2)
 
 # Step 4: Butterworth 对 S_M 的每一列平滑滤波
-cutoff_frequency = 0.1
-sample_rate = 1.0
 S_M_smoothed = np.zeros_like(S_M)
 for i in range(S_M.shape[1]):
-    S_M_smoothed[:, i] = butterworth_filter(S_M[:, i], cutoff_frequency, sample_rate)
+    S_M_smoothed[:, i] = butterworth_filter(S_M[:, i], CUTOFF_FREQUENCY, SAMPLE_RATE)
 
 # Step 5: 将 sigma_M 坐标平移至非负
 min_values = np.min(sigma_M, axis=0)  # (2,)
@@ -278,13 +295,9 @@ theta_r_bar_updated = theta_r_bar + S_M @ min_values.reshape(-1, 1)
 theta_r_bar = theta_r_bar_updated
 
 # Step 6: 加载对角矩阵 E
-file_path_E = r'E:\桌面\code\E.xlsx'
-E_data = pd.read_excel(file_path_E, header=None).values
+E_data = pd.read_excel(E_FILE_PATH, header=None).values
 E = np.diag(E_data.flatten())
 E_inv = np.linalg.inv(E)
-
-# 长度 L
-L = 200
 
 
 # ---------------------
@@ -292,10 +305,10 @@ L = 200
 # ---------------------
 def objective(trial):
     # 1) 超参数搜索空间
-    alpha_11 = trial.suggest_float("alpha_11", 2.0, 100.0, log=True)
-    alpha_22 = trial.suggest_float("alpha_22", 2.0, 100.0, log=True)
-    w_0_1 = trial.suggest_float("w_0_1", -200.0, 200.0)
-    w_0_2 = trial.suggest_float("w_0_2", -200.0, 200.0)
+    alpha_11 = trial.suggest_float("alpha_11", *ALPHA_11_RANGE, log=True)
+    alpha_22 = trial.suggest_float("alpha_22", *ALPHA_22_RANGE, log=True)
+    w_0_1 = trial.suggest_float("w_0_1", *W0_1_RANGE)
+    w_0_2 = trial.suggest_float("w_0_2", *W0_2_RANGE)
 
     try:
         # 2) 组装 alpha 矩阵
@@ -407,7 +420,7 @@ if __name__ == "__main__":
     # ================
     # Step 7: Save results
     # ================
-    output_path = r'E:\桌面\code\results_main3.xlsx'
+    output_path = OUTPUT_PATH
     with pd.ExcelWriter(output_path) as writer:
         # 如果希望与“基准文件”相同 Sheet 名，可以按下述方式写入：
         pd.DataFrame(S_M).to_excel(writer, sheet_name='S(M)', index=False, header=False)
@@ -429,8 +442,3 @@ if __name__ == "__main__":
 
     print(f"Results saved to {output_path}")
     print("Done.")
-
-
-    print("Done.")
-
-
